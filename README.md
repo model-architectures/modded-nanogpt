@@ -4,11 +4,11 @@ Forked from https://github.com/KellerJordan/modded-nanogpt at timestamp 10-20-20
 
 TODO List:
 
-- [] Supporting Wandb
+- [ ] Supporting Wandb
 
-- [] Implementing standard AdamW optimizer
+- [ ] Implementing standard AdamW optimizer
 
-- [] Implementing W = W_QW_K^T LoRA regularization
+- [ ] Implementing W = W_QW_K^T LoRA regularization loss
 
 
 ### Original Introduction
