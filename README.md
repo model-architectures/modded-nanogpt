@@ -6,7 +6,7 @@ TODO List:
 
 - [x] Supporting Wandb
 
-- [ ] Implementing standard AdamW optimizer
+- [x] Implementing standard AdamW optimizer
 
 - [ ] Implementing W = W_QW_K^T LoRA regularization loss
 
