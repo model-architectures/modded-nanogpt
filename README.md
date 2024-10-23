@@ -4,7 +4,7 @@ Forked from https://github.com/KellerJordan/modded-nanogpt at timestamp 10-20-20
 
 TODO List:
 
-- [ ] Supporting Wandb
+- [x] Supporting Wandb
 
 - [ ] Implementing standard AdamW optimizer
 
