@@ -28,6 +28,5 @@ mkdir -p $PIP_CACHE_DIR
 
 sh "${ABSOLUTE_PATH}"/install_requirements.sh
 
-rm -rf "${ABSOLUTE_PATH}/.gitignore"
-echo -e ".cache/\n.tmp/\nvenv*/" >> "${ABSOLUTE_PATH}/.gitignore"
-
+# rm -rf "${ABSOLUTE_PATH}/.gitignore"
+# echo -e ".cache/\n.tmp/\nvenv*/" >> "${ABSOLUTE_PATH}/.gitignore"

@@ -6,3 +6,4 @@ sc_venv_template_hydra/.cache/
 sc_venv_template_hydra/.tmp/
 sc_venv_template_hydra/venv*
 wandb/
+.cache/

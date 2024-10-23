@@ -386,7 +386,7 @@ if master_process:
 # Initialize wandb and track hyperparameters
 if master_process:
     wandb.init(
-        project="moded-nanogpt",  # Set your wandb project name
+        project="modded-nanogpt",  # Set your wandb project name
         config={
             "batch_size": args.batch_size,
             "device_batch_size": args.device_batch_size,
