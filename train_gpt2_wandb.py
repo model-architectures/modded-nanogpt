@@ -515,6 +515,10 @@ for step in range(args.num_iterations + 1):
         torch.cuda.synchronize()
         training_time_ms += 1000 * (time.time() - t0)
 
+        # Ensure the logs directory exists before saving the checkpoint
+        save_dir = f'logs/{wandb.run.id}/'
+        os.makedirs(save_dir, exist_ok=True)  # Create the directory if it doesn't exist
+
         log = {
             "step": step,
             "code": code,
