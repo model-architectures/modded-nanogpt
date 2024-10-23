@@ -3,3 +3,5 @@ pylog124M/
 __pycache__/
 logs/
 .cache/triton
+.cache/wandb
+wandb/
