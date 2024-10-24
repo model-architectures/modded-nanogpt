@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
-#SBATCH --time=2:00:00
+#SBATCH --time=12:00:00
 #SBATCH --gres=gpu:4
 #SBATCH --partition=dc-hwai
 #SBATCH -o %j.log  # %j will be replaced by the job ID
@@ -34,7 +34,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 echo "Job id: $SLURM_JOB_ID"
 source ./sc_venv_template_hydra/activate.sh 
 
-ARGS=""
+ARGS="--job_id=$SLURM_JOB_ID"
 
 srun --cpu_bind=none bash -c "torchrun \
 --nnodes=$SLURM_NNODES \
