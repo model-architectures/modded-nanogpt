@@ -300,11 +300,11 @@ class Hyperparameters:
     val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     save_every: int = 0  # every how many steps to save the checkpoint? 0 for only at the end
     # Add job_id as a parameter
-    job_id: str = '[default_job_id]'
+    job_id: str = '_default_job_id_'
 
 # Argument parsing for command-line parameters
 parser = argparse.ArgumentParser(description='Training Script with Job ID')
-parser.add_argument('--job_id', type=str, default='[default_job_id]', help='Unique Job ID for this run')
+parser.add_argument('--job_id', type=str, default='_default_job_id_', help='Unique Job ID for this run')
 
 # Parse arguments from the command line
 args_cmd = parser.parse_args()
@@ -404,7 +404,7 @@ scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr)
 
 # begin logging
 if master_process:
-    run_id = str(uuid.uuid4())
+    run_id = f"run_adamw_dual_{current_date}_jobid_{args.job_id}"
     logdir = 'logs/%s/' % run_id
     os.makedirs(logdir, exist_ok=True)
     logfile = 'logs/%s.txt' % run_id

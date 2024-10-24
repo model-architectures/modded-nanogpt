@@ -267,7 +267,7 @@ class Hyperparameters:
 
 # Argument parsing for command-line parameters
 parser = argparse.ArgumentParser(description='Training Script with Job ID')
-parser.add_argument('--job_id', type=str, default='[default_job_id]', help='Unique Job ID for this run')
+parser.add_argument('--job_id', type=str, default='_default_job_id_', help='Unique Job ID for this run')
 
 # Parse arguments from the command line
 args_cmd = parser.parse_args()
