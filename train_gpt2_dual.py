@@ -16,112 +16,8 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
 import math
-# -----------------------------------------------------------------------------
-# Muon optimizer
-
-def zeropower_via_svd(G, steps=None):
-    U, S, V = G.svd()
-    return U @ V.T
-
-@torch.compile
-def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
-    """
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
-    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
-    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
-    zero even beyond the point where the iteration no longer converges all the way to one everywhere
-    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
-    where S' is diagonal with S_{ii}' \sim Uniform(0.5, 1.5), which turns out not to hurt model
-    performance at all relative to UV^T, where USV^T = G is the SVD.
-    """
-    assert len(G.shape) == 2
-    a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    X /= (X.norm() + eps) # ensure top singular value <= 1
-    if G.size(0) > G.size(1):
-        X = X.T
-    for _ in range(steps):
-        A = X @ X.T
-        B = A @ X
-        X = a * X + b * B + c * A @ B
-    if G.size(0) > G.size(1):
-        X = X.T
-    return X
-
-zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
-
-class Muon(torch.optim.Optimizer):
-    """
-    Muon - MomentUm Orthogonalized by Newton-schulz
-
-    Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
-    processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
-    matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
-    the advantage that it can be stably run in bfloat16 on the GPU.
-
-    Some warnings:
-    - This optimizer assumes that all parameters passed in are 2D.
-    - It should not be used for the embedding layer, the final fully connected layer, or any {0,1}-D
-    parameters; those should all be optimized by a standard method (e.g., AdamW).
-    - To use it with 4D convolutional filters, it works well to just flatten their last 3 dimensions.
-    - We believe it is unlikely to work well for training with small batch size.
-    - We believe it may not work well for finetuning pretrained models, but we haven't tested this.
-    - We have not yet tried this optimizer for training scenarios larger than NanoGPT (124M).
-
-    Arguments:
-        lr: The learning rate used by the internal SGD.
-        momentum: The momentum used by the internal SGD.
-        nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
-        backend: The chosen backend for the orthogonalization step. (recommended: 'newtonschulz5')
-        backend_steps: The number of iteration steps to use in the backend, if it is iterative.
-    """
-    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True,
-                 backend='newtonschulz5', backend_steps=5,
-                 rank=0, world_size=1):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
-        super().__init__(params, defaults)
-        self.rank = rank
-        self.world_size = world_size
-
-    def step(self):
-
-        for group in self.param_groups:
-
-            lr = group['lr']
-            momentum = group['momentum']
-            zeropower_backend = zeropower_backends[group['backend']]
-
-            # generate weight updates in distributed fashion
-            total_params = sum(p.numel() for p in group['params'])
-            updates_flat = torch.zeros(total_params, device='cuda', dtype=torch.bfloat16)
-            curr_idx = 0
-            for i, p in enumerate(group['params']):
-                # luckily this will perfectly distribute a transformer with multiple of 4 layers to 8 GPUs
-                if i % self.world_size == self.rank:
-                    g = p.grad
-                    if g is None:
-                        continue
-                    state = self.state[p]
-                    if 'momentum_buffer' not in state:
-                        state['momentum_buffer'] = torch.zeros_like(g)
-                    buf = state['momentum_buffer']
-                    buf.mul_(momentum).add_(g)
-                    if group['nesterov']:
-                        g = g.add(buf, alpha=momentum)
-                    g = zeropower_backend(g, steps=group['backend_steps'])
-                    g *= max(g.size(0), g.size(1))**0.5 # scale to have update.square().mean() == 1
-                    updates_flat[curr_idx:curr_idx+p.numel()] = g.flatten()
-                curr_idx += p.numel()
-
-            # sync updates across devices. we are not memory-constrained so can do this simple deserialization
-            dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
-
-            # deserialize and apply updates
-            curr_idx = 0
-            for p in group['params']:
-                g = updates_flat[curr_idx:curr_idx+p.numel()].view_as(p.data).type_as(p.data)
-                p.data.add_(g, alpha=-lr)
-                curr_idx += p.numel()
+from datetime import datetime  
+import argparse
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the GPT-2 model
@@ -182,91 +78,44 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view_as(x) # re-assemble all head outputs side by side
         y = self.c_proj(y)
         return y
-# RoPE编码函数
-def apply_rope(x):
-    seq_len, d_k = x.shape[-2], x.shape[-1]
-    half_d_k = d_k // 2
-
-    # 创建频率矩阵
-    freq_seq = torch.arange(0, half_d_k, dtype=torch.float32)
-    inv_freq = 1.0 / (10000 ** (freq_seq / half_d_k))
-
-    # 创建位置矩阵
-    pos_seq = torch.arange(seq_len, dtype=torch.float32)
-    sinusoid_inp = torch.einsum("i,j->ij", pos_seq, inv_freq)
-
-    # 计算正弦和余弦矩阵
-    sin, cos = sinusoid_inp.sin(), sinusoid_inp.cos()
-    sin, cos = sin.to(x.device), cos.to(x.device)
-
-    # 应用RoPE编码
-    x1, x2 = x[..., :half_d_k], x[..., half_d_k:]
-    x = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
-    return x
 
 class DualMultiHeadAttention(nn.Module):
-    def __init__(self):
-        super(DualMultiHeadAttention, self).__init__()
-        
+    def __init__(self, config):
+        super().__init__()
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        assert self.n_embd % self.n_head == 0
         self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        self.c_q = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_k = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_v = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_q2 = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_k2 = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_v2 = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        # output projection
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
+        self.rotary = Rotary(self.head_dim)
 
-        self.W_Q1 = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.W_K1 = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.W_V1 = nn.Linear(self.n_embd, self.n_embd, bias=False)
-
-        self.W_Q2 = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.W_K2 = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.W_V2 = nn.Linear(self.n_embd, self.n_embd, bias=False)
-
-        self.W_O = nn.Linear(self.n_embd, self.n_embd, bias=False)
-
-    def forward(self, query, key, value, mask=None):
-        batch_size = query.size(0)
-
-        # 线性变换并分割成多头 (第一路)
-        Q1 = self.W_Q1(query).view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
-        K1 = self.W_K1(key).view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
-        V1 = self.W_V1(value).view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
-
-        # 线性变换并分割成多头 (第二路)
-        Q2 = self.W_Q2(query).view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
-        K2 = self.W_K2(key).view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
-        V2 = self.W_V2(value).view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
-
-        # 应用RoPE编码 (第一路)
-        Q1 = apply_rope(Q1)
-        K1 = apply_rope(K1)
-
-        # 应用RoPE编码 (第二路)
-        Q2 = apply_rope(Q2)
-        K2 = apply_rope(K2)
-
-        # 缩放点积注意力 (第一路)
-        scores1 = torch.matmul(Q1, K1.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores1 = scores1.masked_fill(mask == 0, -1e9)
-        attention_weights1 = F.softmax(scores1, dim=-1)
-        context1 = torch.matmul(attention_weights1, V1)
-
-        # 缩放点积注意力 (第二路)
-        scores2 = torch.matmul(Q2, K2.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores2 = scores2.masked_fill(mask == 0, -1e9)
-        attention_weights2 = F.softmax(scores2, dim=-1)
-        context2 = torch.matmul(attention_weights2, V2)
-
-        # 逐元素相乘
-        context = context1 * context2
-
-        # 连接头并应用线性变换
-        context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_embd)
-        output = self.W_O(context)
-        
-        return output, attention_weights1, attention_weights2
-    
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.c_k(x).view(B, T, self.n_head, self.head_dim)
+        v = self.c_v(x).view(B, T, self.n_head, self.head_dim)
+        q2 = self.c_q2(x).view(B, T, self.n_head, self.head_dim)
+        k2 = self.c_k2(x).view(B, T, self.n_head, self.head_dim)
+        v2 = self.c_v2(x).view(B, T, self.n_head, self.head_dim)
+        cos, sin = self.rotary(q)
+        q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),)) # QK norm suggested by @Grad62304977
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+        q2, k2 = F.rms_norm(q2, (q2.size(-1),)), F.rms_norm(k2, (k2.size(-1),)) # QK norm suggested by @Grad62304977
+        q2, k2 = apply_rotary_emb(q2, cos, sin), apply_rotary_emb(k2, cos, sin)
+        y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True)
+        y2 = F.scaled_dot_product_attention(q2.transpose(1, 2), k2.transpose(1, 2), v2.transpose(1, 2), is_causal=True)
+        y_output = y * y2
+        y_output = y_output.transpose(1, 2).contiguous().view_as(x) # re-assemble all head outputs side by side
+        y_output = self.c_proj(y_output)
+        return y_output
 class MLP(nn.Module):
 
     def __init__(self, config):
@@ -298,7 +147,7 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.attn = DualMultiHeadAttention(config)
+        self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -435,8 +284,8 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data hyperparams
-    input_bin : str = 'data/fineweb10B/fineweb_train_*.bin' # input .bin to train on
-    input_val_bin : str = 'data/fineweb10B/fineweb_val_*.bin' # input .bin to eval validation loss on
+    input_bin: str = 'data/fineweb10B/fineweb_train_*.bin'  # input .bin to train on
+    input_val_bin: str = 'data/fineweb10B/fineweb_val_*.bin'  # input .bin to eval validation loss on
     # optimization hyperparams
     batch_size : int = 8*64 # batch size, in sequences, across all devices
     device_batch_size : int = 64 # batch size, in sequences, per device
@@ -472,7 +321,7 @@ ddp_world_size = int(os.environ['WORLD_SIZE'])
 device = f'cuda:{ddp_local_rank}'
 torch.cuda.set_device(device)
 print(f"using device: {device}")
-master_process = (ddp_rank == 0) # this process will do logging, checkpointing etc.
+master_process = (ddp_rank == 0)  # this process will do logging, checkpointing etc.
 
 # convenience variables
 B, T = args.device_batch_size, args.sequence_length
@@ -489,7 +338,6 @@ val_loader = DistributedDataLoader(args.input_val_bin, B, T, ddp_rank, ddp_world
 if master_process:
     print(f"Training DataLoader: total number of tokens: {train_loader.ntok_total} across {len(train_loader.files)} files")
     print(f"Validation DataLoader: total number of tokens: {val_loader.ntok_total} across {len(val_loader.files)} files")
-
 
 # Initialize wandb and track hyperparameters
 if master_process:
@@ -512,7 +360,7 @@ if master_process:
         }
     )
     # Use the job_id and current date to name the wandb run
-    wandb.run.name = f"run_adamw_dual_{current_date}_jobid_{args.job_id}"  # Modified run name
+    wandb.run.name = f"run_adamw_{current_date}_jobid_{args.job_id}"  # Modified run name
 
     # Log the Python code and environment details
     wandb.config.update({
