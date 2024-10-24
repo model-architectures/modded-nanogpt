@@ -8,7 +8,7 @@ TODO List:
 
 - [x] Implementing standard AdamW optimizer
 
-- [ ] Fix gradient accumulation bug
+- [x] Fix gradient accumulation bug (No padding means no bug in pre-train settting)
 
 - [ ] Add print of total parameters count into print log as well as wandb runname
 
