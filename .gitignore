@@ -1,4 +1,7 @@
-fineweb10B/
+data/fineweb-edu10B/
+data/fineweb-edu100B/
+data/fineweb100B/
+data/fineweb10B/
 pylog124M/
 __pycache__/
 logs/
