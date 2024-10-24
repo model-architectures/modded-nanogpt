@@ -254,16 +254,16 @@ class Hyperparameters:
     device_batch_size : int = 64 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
     num_iterations : int = 100000 # number of iterations to run
-    learning_rate : float = 0.0036
-    warmup_iters : int = 0
-    warmdown_iters : int = 0 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
+    learning_rate : float = 6e-4
+    warmup_iters : int = 2000
+    warmdown_iters : int = 10000 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
     weight_decay : float = 0
     # evaluation and logging hyperparams
     val_loss_every: int = 125  # every how many steps to evaluate val loss? 0 for only at the end
     val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     save_every: int = 0  # every how many steps to save the checkpoint? 0 for only at the end
     # Add job_id as a parameter
-    job_id: str = '[default_job_id]'
+    job_id: str = '_default_job_id_'
 
 # Argument parsing for command-line parameters
 parser = argparse.ArgumentParser(description='Training Script with Job ID')
@@ -367,7 +367,7 @@ scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr)
 
 # begin logging
 if master_process:
-    run_id = str(uuid.uuid4())
+    run_id = f"run_adamw_{current_date}_jobid_{args.job_id}"
     logdir = 'logs/%s/' % run_id
     os.makedirs(logdir, exist_ok=True)
     logfile = 'logs/%s.txt' % run_id
