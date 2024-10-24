@@ -1,1 +1,1 @@
-torchrun --standalone --nproc_per_node=4 train_gpt2_dual.py
+torchrun --standalone --nproc_per_node=4 train.py --model_type gpt2_dual

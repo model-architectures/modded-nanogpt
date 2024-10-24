@@ -2,169 +2,19 @@ import os
 import sys
 with open(sys.argv[0]) as f:
     code = f.read() # read the code of this file ASAP, for logging
-import uuid
 import glob
 import time
-from dataclasses import dataclass
 
 import numpy as np
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
 import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
-import math
 from datetime import datetime  
 import argparse
+from optimizer.Muon import Muon
 
-# -----------------------------------------------------------------------------
-# PyTorch nn.Module definitions for the GPT-2 model
-
-class Rotary(torch.nn.Module):
-
-    def __init__(self, dim, base=10000):
-        super().__init__()
-        self.inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.seq_len_cached = None
-        self.cos_cached = None
-        self.sin_cached = None
-
-    def forward(self, x):
-        seq_len = x.shape[1]
-        if seq_len != self.seq_len_cached:
-            self.seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-            freqs = torch.outer(t, self.inv_freq).to(x.device)
-            self.cos_cached = freqs.cos().bfloat16()
-            self.sin_cached = freqs.sin().bfloat16()
-        return self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
-
-def apply_rotary_emb(x, cos, sin):
-    assert x.ndim == 4 # multihead attention
-    d = x.shape[3]//2
-    x1 = x[..., :d]
-    x2 = x[..., d:]
-    y1 = x1 * cos + x2 * sin
-    y2 = x1 * (-sin) + x2 * cos
-    return torch.cat([y1, y2], 3).type_as(x)
-
-class CausalSelfAttention(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.head_dim = self.n_embd // self.n_head
-        assert self.n_embd % self.n_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        # output projection
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
-        self.rotary = Rotary(self.head_dim)
-
-    def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
-        k = self.c_k(x).view(B, T, self.n_head, self.head_dim)
-        v = self.c_v(x).view(B, T, self.n_head, self.head_dim)
-        cos, sin = self.rotary(q)
-        q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),)) # QK norm suggested by @Grad62304977
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True)
-        y = y.transpose(1, 2).contiguous().view_as(x) # re-assemble all head outputs side by side
-        y = self.c_proj(y)
-        return y
-
-class MLP(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        # Calculate the floored hidden dimension size
-        hidden_dim = math.floor(8 / 3 * config.n_embd)
-        
-        # Split the linear projection into two parts for SwiGLU
-        self.c_fc1 = nn.Linear(config.n_embd, hidden_dim, bias=False)
-        self.c_fc2 = nn.Linear(config.n_embd, hidden_dim, bias=False)
-        
-        # Output projection
-        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
-        self.c_proj.weight.data.zero_()  # zero init suggested by @Grad62304977
-
-    def forward(self, x):
-        # Apply the first linear layer to produce two projections
-        x1 = self.c_fc1(x)
-        x2 = self.c_fc2(x)
-
-        # Apply the SwiGLU gating: SILU on one projection, and gate with the other
-        x = F.silu(x1) * x2
-        
-        # Apply the final output projection
-        x = self.c_proj(x)
-        return x
-
-class Block(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.attn = CausalSelfAttention(config)
-        self.mlp = MLP(config)
-
-    def forward(self, x):
-        x = x + self.attn(F.rms_norm(x, (x.size(-1),)))
-        x = x + self.mlp(F.rms_norm(x, (x.size(-1),)))
-        return x
-
-# -----------------------------------------------------------------------------
-# The main GPT-2 model
-
-@dataclass
-class GPTConfig:
-    vocab_size : int = 50304
-    n_layer : int = 12
-    n_head : int = 6 # head dim 128 suggested by @Grad62304977
-    n_embd : int = 768
-
-class GPT(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-        ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
-
-    def forward(self, idx, targets=None, return_logits=True):
-
-        # forward the GPT model itself
-        x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        for block in self.transformer.h:
-            x = block(x)
-        x = F.rms_norm(x, (x.size(-1),))
-
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            logits = logits.float() # use tf32/fp32 for logits
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            logits = logits.float() # use tf32/fp32 for logits
-            loss = None
-
-        # there are performance reasons why not returning logits is prudent, if not needed
-        if not return_logits:
-            logits = None
-
-        return logits, loss
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -244,38 +94,40 @@ class DistributedDataLoader:
 # -----------------------------------------------------------------------------
 # int main
 
-@dataclass
-class Hyperparameters:
-    # data hyperparams
-    input_bin: str = 'data/fineweb10B/fineweb_train_*.bin'  # input .bin to train on
-    input_val_bin: str = 'data/fineweb10B/fineweb_val_*.bin'  # input .bin to eval validation loss on
-    # optimization hyperparams
-    batch_size : int = 8*64 # batch size, in sequences, across all devices
-    device_batch_size : int = 64 # batch size, in sequences, per device
-    sequence_length : int = 1024 # sequence length, in tokens
-    num_iterations : int = 100000 # number of iterations to run
-    learning_rate : float = 6e-4
-    warmup_iters : int = 2000
-    warmdown_iters : int = 10000 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
-    weight_decay : float = 0
-    # evaluation and logging hyperparams
-    val_loss_every: int = 125  # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    save_every: int = 0  # every how many steps to save the checkpoint? 0 for only at the end
-    # Add job_id as a parameter
-    job_id: str = '_default_job_id_'
-
 # Argument parsing for command-line parameters
 parser = argparse.ArgumentParser(description='Training Script with Job ID')
 parser.add_argument('--job_id', type=str, default='[default_job_id]', help='Unique Job ID for this run')
+parser.add_argument('--input_bin', type=str, default='data/fineweb10B/fineweb_train_*.bin', help='Input .bin to train on')
+parser.add_argument('--input_val_bin', type=str, default='data/fineweb10B/fineweb_val_*.bin', help='Input .bin to eval validation loss on')
+parser.add_argument('--batch_size', type=int, default=8*64, help='Batch size, in sequences, across all devices')
+parser.add_argument('--device_batch_size', type=int, default=64, help='Batch size, in sequences, per device')
+parser.add_argument('--sequence_length', type=int, default=1024, help='Sequence length, in tokens')
+parser.add_argument('--num_layers', type=int, default=12, help='Number of transformer layers')
+parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
+parser.add_argument('--embedding_size', type=int, default=768, help='Size of the embeddings')
+
+parser.add_argument('--num_iterations', type=int, default=100000, help='Number of iterations to run')
+parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
+parser.add_argument('--warmup_iters', type=int, default=2000, help='Number of iterations of linear warmup')
+parser.add_argument('--warmdown_iters', type=int, default=10000, help='Number of iterations of linear warmdown')
+parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay')
+parser.add_argument('--val_loss_every', type=int, default=125, help='Every how many steps to evaluate val loss? 0 for only at the end')
+parser.add_argument('--val_tokens', type=int, default=10485760, help='How many tokens of validation data?')
+parser.add_argument('--save_every', type=int, default=0, help='Every how many steps to save the checkpoint? 0 for only at the end')
+parser.add_argument('--model_type', type=str, default='gpt2', help='Model type to train')
+parser.add_argument('--optimizer', type=str, default='adamw', help='Optimizer to use')
+parser.add_argument('--scheduler', type=str, default='wsd', help='Scheduler to use')
 
 # Parse arguments from the command line
-args_cmd = parser.parse_args()
-
-# Update the Hyperparameters class to use the parsed job_id
-args = Hyperparameters(job_id=args_cmd.job_id)
-
+args = parser.parse_args()
 # set up DDP (distributed data parallel). torchrun sets this env variable
+
+if args.model_type == 'gpt2':
+    from model.GPT import GPT, GPTConfig
+elif args.model_type == 'gpt2_dual':
+    from model.GPT_dual import GPT, GPTConfig
+else:
+    raise ValueError(f"Unknown model type: {args.model_type}")
 assert torch.cuda.is_available()
 dist.init_process_group(backend='nccl')
 ddp_rank = int(os.environ['RANK'])
@@ -323,7 +175,7 @@ if master_process:
         }
     )
     # Use the job_id and current date to name the wandb run
-    wandb.run.name = f"run_adamw_{current_date}_jobid_{args.job_id}"  # Modified run name
+    wandb.run.name = f"run_{args.optimizer}_{args.model_type}_{current_date}_jobid_{args.job_id}"  # Modified run name
 
     # Log the Python code and environment details
     wandb.config.update({
@@ -336,7 +188,7 @@ x, y = train_loader.next_batch()
 # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
 # this originates from Karpathy's experiments.
 num_vocab = 50304
-model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=12, n_head=6, n_embd=768))
+model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.num_layers, n_head=args.num_heads, n_embd=args.embedding_size))
 model = model.cuda()
 if hasattr(config, "coordinate_descent_tuning"):
     config.coordinate_descent_tuning = True # suggested by @Chillee
@@ -347,11 +199,18 @@ raw_model = model.module # always contains the "raw" unwrapped model
 ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
 # init the optimizer (AdamW for all parameters)
-optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
-                              weight_decay=args.weight_decay, fused=True)
+optimizers = []
+for opt in args.optimizer.split(","):
+    if opt == "adamw":
+        optimizers.append(torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
+                                            weight_decay=args.weight_decay, fused=True))
+    elif opt == "muon":
+        optimizers.append(Muon(raw_model.transformer.h.parameters(), lr=0.1*args.learning_rate, momentum=0.95,
+                  rank=ddp_rank, world_size=ddp_world_size))
 
 # learning rate decay scheduler (linear warmup and warmdown)
 def get_lr(it):
+    # WSD scheduler
     assert it <= args.num_iterations
     # 1) linear warmup for warmup_iters steps
     if it < args.warmup_iters:
@@ -363,11 +222,16 @@ def get_lr(it):
     else:
         decay_ratio = (args.num_iterations - it) / args.warmdown_iters
         return decay_ratio
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr)
-
+    
+if args.scheduler == "wsd":
+    schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, get_lr) for opt in optimizers]
+elif args.scheduler == "cosine":
+    schedulers = [torch.optim.lr_scheduler.CosineAnnealingLR(opt, args.num_iterations) for opt in optimizers]
+else:
+    raise ValueError(f"Unknown scheduler: {args.scheduler}")
 # begin logging
 if master_process:
-    run_id = f"run_adamw_{current_date}_jobid_{args.job_id}"
+    run_id = f"run_{args.optimizer}_{args.model_type}_{current_date}_jobid_{args.job_id}"
     logdir = 'logs/%s/' % run_id
     os.makedirs(logdir, exist_ok=True)
     logfile = 'logs/%s.txt' % run_id
@@ -444,7 +308,7 @@ for step in range(args.num_iterations + 1):
             "step": step,
             "code": code,
             "model_state_dict": raw_model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
+            "optimizer_states": [opt.state_dict() for opt in optimizers],
         }
         torch.save(log, f'logs/{wandb.run.id}/state_step{step:06d}.pt')
 
@@ -471,12 +335,13 @@ for step in range(args.num_iterations + 1):
         else:
             loss.backward()
 
-    # Scale gradients and step optimizer
+    # Scale gradients and step optimizers
     for p in model.parameters():
         p.grad /= train_accumulation_steps
 
-    optimizer.step()
-    scheduler.step()
+    for opt, sched in zip(optimizers, schedulers):
+        opt.step()
+        sched.step()
 
     model.zero_grad(set_to_none=True)
 
