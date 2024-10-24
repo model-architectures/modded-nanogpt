@@ -60,10 +60,10 @@ args = parser.parse_args()
 # FineWeb has a few possible subsamples available
 assert args.version in ["10B", "100B"], "version must be one of 10B, 100B"
 if args.version == "10B":
-    local_dir = "fineweb10B"
+    local_dir = "fineweb-edu10B"
     remote_name = "sample-10BT"
 elif args.version == "100B":
-    local_dir = "fineweb100B"
+    local_dir = "fineweb-edu100B"
     remote_name = "sample-100BT"
 
 # create the cache the local directory if it doesn't exist yet
@@ -71,7 +71,7 @@ DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 # download the dataset
-fw = load_dataset("HuggingFaceFW/fineweb", name=remote_name, split="train")
+fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
 
 # init the tokenizer
 enc = tiktoken.get_encoding("gpt2")
