@@ -342,7 +342,7 @@ if master_process:
 # Initialize wandb and track hyperparameters
 if master_process:
     # Get the current date in MM_DD_YY format
-    current_date = datetime.now().strftime("%m_%d_%y")
+    current_date = datetime.now().strftime("%m_%d_%y_%H_%M")
 
     wandb.init(
         project="modded-nanogpt",  # Set your wandb project name
