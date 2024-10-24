@@ -16,7 +16,7 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
 import math
-import datetime
+from datetime import datetime  
 import argparse
 
 # -----------------------------------------------------------------------------
