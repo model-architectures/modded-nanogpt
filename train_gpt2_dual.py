@@ -271,13 +271,26 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
-        self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
+        # Calculate the floored hidden dimension size
+        hidden_dim = math.floor(8 / 3 * config.n_embd)
+        
+        # Split the linear projection into two parts for SwiGLU
+        self.c_fc1 = nn.Linear(config.n_embd, hidden_dim, bias=False)
+        self.c_fc2 = nn.Linear(config.n_embd, hidden_dim, bias=False)
+        
+        # Output projection
+        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
+        self.c_proj.weight.data.zero_()  # zero init suggested by @Grad62304977
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+        # Apply the first linear layer to produce two projections
+        x1 = self.c_fc1(x)
+        x2 = self.c_fc2(x)
+
+        # Apply the SwiGLU gating: SILU on one projection, and gate with the other
+        x = F.silu(x1) * x2
+        
+        # Apply the final output projection
         x = self.c_proj(x)
         return x
 
@@ -431,7 +444,7 @@ class Hyperparameters:
     num_iterations : int = 100000 # number of iterations to run
     learning_rate : float = 0.0036
     warmup_iters : int = 0
-    warmdown_iters : int = 1450 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
+    warmdown_iters : int = 0 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
     weight_decay : float = 0
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
