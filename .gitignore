@@ -2,9 +2,18 @@ fineweb10B/
 pylog124M/
 __pycache__/
 logs/
+<<<<<<< HEAD
 .cache/triton
 .cache/wandb
 wandb/
 sc_venv_template_hydra/.cache
 sc_venv_template_hydra/.tmp
 sc_venv_template_hydra/venv*
+=======
+sc_venv_template_hydra/.cache/
+sc_venv_template_hydra/.tmp/
+sc_venv_template_hydra/venv*
+wandb/
+.cache/
+*log
+>>>>>>> ad9eff1453dc149139abe2e1befcc2646b09cfa6

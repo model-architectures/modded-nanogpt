@@ -6,7 +6,13 @@ TODO List:
 
 - [x] Supporting Wandb
 
+<<<<<<< HEAD
 - [ ] Implementing standard AdamW optimizer
+=======
+- [x] Implementing standard AdamW optimizer
+
+- [ ] Fix gradient accumulation bug
+>>>>>>> ad9eff1453dc149139abe2e1befcc2646b09cfa6
 
 - [ ] Implementing W = W_QW_K^T LoRA regularization loss
 
