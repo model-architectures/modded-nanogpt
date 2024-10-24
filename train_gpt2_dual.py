@@ -284,8 +284,8 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data hyperparams
-    input_bin: str = 'data/fineweb-edu100B/fineweb_train_*.bin'  # input .bin to train on
-    input_val_bin: str = 'data/fineweb-edu100B/fineweb_val_*.bin'  # input .bin to eval validation loss on
+    input_bin: str = 'data/fineweb-edu10B/fineweb_train_*.bin'  # input .bin to train on
+    input_val_bin: str = 'data/fineweb-edu10B/fineweb_val_*.bin'  # input .bin to eval validation loss on
     # optimization hyperparams
     batch_size : int = 8*64 # batch size, in sequences, across all devices
     device_batch_size : int = 64 # batch size, in sequences, per device
