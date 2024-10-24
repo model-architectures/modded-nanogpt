@@ -10,6 +10,8 @@ TODO List:
 
 - [ ] Fix gradient accumulation bug
 
+- [ ] Add print of total parameters count into print log as well as wandb runname
+
 - [ ] Implementing W = W_QW_K^T LoRA regularization loss
 
 
