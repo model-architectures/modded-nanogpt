@@ -298,7 +298,7 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.attn = CausalSelfAttention(config)
+        self.attn = DualMultiHeadAttention(config)
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -447,10 +447,21 @@ class Hyperparameters:
     warmdown_iters : int = 0 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
     weight_decay : float = 0
     # evaluation and logging hyperparams
-    val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens : int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
-args = Hyperparameters()
+    val_loss_every: int = 125  # every how many steps to evaluate val loss? 0 for only at the end
+    val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    save_every: int = 0  # every how many steps to save the checkpoint? 0 for only at the end
+    # Add job_id as a parameter
+    job_id: str = '[default_job_id]'
+
+# Argument parsing for command-line parameters
+parser = argparse.ArgumentParser(description='Training Script with Job ID')
+parser.add_argument('--job_id', type=str, default='[default_job_id]', help='Unique Job ID for this run')
+
+# Parse arguments from the command line
+args_cmd = parser.parse_args()
+
+# Update the Hyperparameters class to use the parsed job_id
+args = Hyperparameters(job_id=args_cmd.job_id)
 
 # set up DDP (distributed data parallel). torchrun sets this env variable
 assert torch.cuda.is_available()
@@ -482,6 +493,9 @@ if master_process:
 
 # Initialize wandb and track hyperparameters
 if master_process:
+    # Get the current date in MM_DD_YY format
+    current_date = datetime.now().strftime("%m_%d_%y")
+
     wandb.init(
         project="modded-nanogpt",  # Set your wandb project name
         config={
@@ -497,7 +511,8 @@ if master_process:
             "val_tokens": args.val_tokens,
         }
     )
-    wandb.run.name = f"dual_{str(uuid.uuid4())[:8]}"  # Optional: Add a run name
+    # Use the job_id and current date to name the wandb run
+    wandb.run.name = f"run_adamw_dual_{current_date}_jobid_{args.job_id}"  # Modified run name
 
     # Log the Python code and environment details
     wandb.config.update({
@@ -520,12 +535,10 @@ model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module # always contains the "raw" unwrapped model
 ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
-# init the optimizer(s)
-optimizer1 = torch.optim.AdamW(raw_model.lm_head.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
-                               weight_decay=args.weight_decay, fused=True)
-optimizer2 = Muon(raw_model.transformer.h.parameters(), lr=0.1*args.learning_rate, momentum=0.95,
-                  rank=ddp_rank, world_size=ddp_world_size)
-optimizers = [optimizer1, optimizer2]
+# init the optimizer (AdamW for all parameters)
+optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
+                              weight_decay=args.weight_decay, fused=True)
+
 # learning rate decay scheduler (linear warmup and warmdown)
 def get_lr(it):
     assert it <= args.num_iterations
@@ -539,7 +552,7 @@ def get_lr(it):
     else:
         decay_ratio = (args.num_iterations - it) / args.warmdown_iters
         return decay_ratio
-schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, get_lr) for opt in optimizers]
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr)
 
 # begin logging
 if master_process:
@@ -620,7 +633,7 @@ for step in range(args.num_iterations + 1):
             "step": step,
             "code": code,
             "model_state_dict": raw_model.state_dict(),
-            "optimizer_states": [opt.state_dict() for opt in optimizers],
+            "optimizer_state": optimizer.state_dict(),
         }
         torch.save(log, f'logs/{wandb.run.id}/state_step{step:06d}.pt')
 
@@ -647,13 +660,12 @@ for step in range(args.num_iterations + 1):
         else:
             loss.backward()
 
-    # Scale gradients and step optimizers
+    # Scale gradients and step optimizer
     for p in model.parameters():
         p.grad /= train_accumulation_steps
 
-    for opt, sched in zip(optimizers, schedulers):
-        opt.step()
-        sched.step()
+    optimizer.step()
+    scheduler.step()
 
     model.zero_grad(set_to_none=True)
 
@@ -677,4 +689,3 @@ dist.destroy_process_group()
 
 if master_process:
     wandb.finish()
-    
