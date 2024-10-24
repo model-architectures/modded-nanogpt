@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
-#SBATCH --time=2:00:00
+#SBATCH --time=12:00:00
 #SBATCH --gres=gpu:4
 #SBATCH --partition=dc-hwai
 #SBATCH -o %j.log  # %j will be replaced by the job ID
@@ -39,4 +39,4 @@ ARGS=""
 srun --cpu_bind=none bash -c "torchrun \
 --nnodes=$SLURM_NNODES \
 --rdzv_backend c10d --nproc_per_node=4 --rdzv_id $RANDOM --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT --rdzv_conf=is_host=\$(if ((SLURM_NODEID)); then echo 0; else echo 1; fi) \
-./train_gpt2_adamw.py $ARGS  "
+./train_gpt2_adam.py $ARGS  "
