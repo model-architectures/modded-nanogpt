@@ -8,6 +8,8 @@ TODO List:
 
 - [x] Implementing standard AdamW optimizer
 
+- [ ] Fix gradient accumulation bug
+
 - [ ] Implementing W = W_QW_K^T LoRA regularization loss
 
 
