@@ -16,6 +16,8 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
 import math
+import datetime
+import argparse
 
 # -----------------------------------------------------------------------------
 # Muon optimizer
@@ -352,22 +354,33 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data hyperparams
-    input_bin : str = 'data/fineweb10B/fineweb_train_*.bin' # input .bin to train on
-    input_val_bin : str = 'data/fineweb10B/fineweb_val_*.bin' # input .bin to eval validation loss on
+    input_bin: str = 'data/fineweb10B/fineweb_train_*.bin'  # input .bin to train on
+    input_val_bin: str = 'data/fineweb10B/fineweb_val_*.bin'  # input .bin to eval validation loss on
     # optimization hyperparams
-    batch_size : int = 8*64 # batch size, in sequences, across all devices
-    device_batch_size : int = 64 # batch size, in sequences, per device
-    sequence_length : int = 1024 # sequence length, in tokens
-    num_iterations : int = 100000 # number of iterations to run
-    learning_rate : float = 0.0036
-    warmup_iters : int = 0
-    warmdown_iters : int = 0 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
-    weight_decay : float = 0
+    batch_size: int = 8*64  # batch size, in sequences, across all devices
+    device_batch_size: int = 64  # batch size, in sequences, per device
+    sequence_length: int = 1024  # sequence length, in tokens
+    num_iterations: int = 100000  # number of iterations to run
+    learning_rate: float = 0.0036
+    warmup_iters: int = 0
+    warmdown_iters: int = 0  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
+    weight_decay: float = 0
     # evaluation and logging hyperparams
-    val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens : int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
-args = Hyperparameters()
+    val_loss_every: int = 125  # every how many steps to evaluate val loss? 0 for only at the end
+    val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    save_every: int = 0  # every how many steps to save the checkpoint? 0 for only at the end
+    # Add job_id as a parameter
+    job_id: str = 'default_job_id'
+
+# Argument parsing for command-line parameters
+parser = argparse.ArgumentParser(description='Training Script with Job ID')
+parser.add_argument('--job_id', type=str, default='default_job_id', help='Unique Job ID for this run')
+
+# Parse arguments from the command line
+args_cmd = parser.parse_args()
+
+# Update the Hyperparameters class to use the parsed job_id
+args = Hyperparameters(job_id=args_cmd.job_id)
 
 # set up DDP (distributed data parallel). torchrun sets this env variable
 assert torch.cuda.is_available()
@@ -378,7 +391,7 @@ ddp_world_size = int(os.environ['WORLD_SIZE'])
 device = f'cuda:{ddp_local_rank}'
 torch.cuda.set_device(device)
 print(f"using device: {device}")
-master_process = (ddp_rank == 0) # this process will do logging, checkpointing etc.
+master_process = (ddp_rank == 0)  # this process will do logging, checkpointing etc.
 
 # convenience variables
 B, T = args.device_batch_size, args.sequence_length
@@ -396,9 +409,11 @@ if master_process:
     print(f"Training DataLoader: total number of tokens: {train_loader.ntok_total} across {len(train_loader.files)} files")
     print(f"Validation DataLoader: total number of tokens: {val_loader.ntok_total} across {len(val_loader.files)} files")
 
-
 # Initialize wandb and track hyperparameters
 if master_process:
+    # Get the current date in MM_DD_YY format
+    current_date = datetime.now().strftime("%m_%d_%y")
+
     wandb.init(
         project="modded-nanogpt",  # Set your wandb project name
         config={
@@ -414,7 +429,8 @@ if master_process:
             "val_tokens": args.val_tokens,
         }
     )
-    wandb.run.name = f"run_muon_{str(uuid.uuid4())[:8]}"  # Optional: Add a run name
+    # Use the job_id and current date to name the wandb run
+    wandb.run.name = f"run_muon_{current_date}_{args.job_id}"  # Modified run name
 
     # Log the Python code and environment details
     wandb.config.update({
