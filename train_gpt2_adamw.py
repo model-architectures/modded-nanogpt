@@ -263,11 +263,11 @@ class Hyperparameters:
     val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     save_every: int = 0  # every how many steps to save the checkpoint? 0 for only at the end
     # Add job_id as a parameter
-    job_id: str = 'default_job_id'
+    job_id: str = '[default_job_id]'
 
 # Argument parsing for command-line parameters
 parser = argparse.ArgumentParser(description='Training Script with Job ID')
-parser.add_argument('--job_id', type=str, default='default_job_id', help='Unique Job ID for this run')
+parser.add_argument('--job_id', type=str, default='[default_job_id]', help='Unique Job ID for this run')
 
 # Parse arguments from the command line
 args_cmd = parser.parse_args()
@@ -323,7 +323,7 @@ if master_process:
         }
     )
     # Use the job_id and current date to name the wandb run
-    wandb.run.name = f"run_adamw_{current_date}_{args.job_id}"  # Modified run name
+    wandb.run.name = f"run_adamw_{current_date}_jobid_{args.job_id}"  # Modified run name
 
     # Log the Python code and environment details
     wandb.config.update({

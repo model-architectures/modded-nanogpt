@@ -34,7 +34,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 echo "Job id: $SLURM_JOB_ID"
 source ./sc_venv_template_hydra/activate.sh 
 
-ARGS=""
+ARGS="--job_id=$SLURM_JOB_ID"
 
 srun --cpu_bind=none bash -c "torchrun \
 --nnodes=$SLURM_NNODES \
