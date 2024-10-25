@@ -34,9 +34,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 echo "Job id: $SLURM_JOB_ID"
 source ./sc_venv_template_hydra/activate.sh 
 
-ARGS="--job_id=$SLURM_JOB_ID"
+ARGS="--job_id=$SLURM_JOB_ID --model_type=gpt2_dual"
 
 srun --cpu_bind=none bash -c "torchrun \
 --nnodes=$SLURM_NNODES \
 --rdzv_backend c10d --nproc_per_node=4 --rdzv_id $RANDOM --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT --rdzv_conf=is_host=\$(if ((SLURM_NODEID)); then echo 0; else echo 1; fi) \
-./train_gpt2_dual.py $ARGS  "
+./train.py $ARGS"
